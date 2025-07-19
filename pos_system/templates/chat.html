@@ -1,0 +1,364 @@
+{% extends "base.html" %}
+
+{% block title %}Chat - Real-time Messaging System{% endblock %}
+
+{% block extra_css %}
+<style>
+    .chat-layout {
+        display: grid;
+        grid-template-columns: 300px 1fr;
+        gap: 20px;
+        height: 80vh;
+    }
+    .sidebar {
+        background: white;
+        border: 1px solid #dee2e6;
+        border-radius: 8px;
+        overflow: hidden;
+    }
+    .chat-area {
+        background: white;
+        border: 1px solid #dee2e6;
+        border-radius: 8px;
+        display: flex;
+        flex-direction: column;
+    }
+    .chat-header {
+        padding: 15px;
+        border-bottom: 1px solid #dee2e6;
+        background-color: #f8f9fa;
+    }
+    .message-input-area {
+        padding: 15px;
+        border-top: 1px solid #dee2e6;
+        background-color: #f8f9fa;
+    }
+    .conversation-item {
+        padding: 10px 15px;
+        border-bottom: 1px solid #dee2e6;
+        cursor: pointer;
+        transition: background-color 0.2s;
+    }
+    .conversation-item:hover {
+        background-color: #f8f9fa;
+    }
+    .conversation-item.active {
+        background-color: #007bff;
+        color: white;
+    }
+    .conversation-preview {
+        font-size: 0.9rem;
+        color: #6c757d;
+        margin-top: 2px;
+    }
+    .no-chat-selected {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 100%;
+        color: #6c757d;
+        font-style: italic;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="chat-layout">
+    <!-- Sidebar with users and conversations -->
+    <div class="sidebar">
+        <div class="chat-header">
+            <h5 class="mb-0"><i class="fas fa-users"></i> Users & Conversations</h5>
+        </div>
+        
+        <!-- Tabs for Users and Recent Conversations -->
+        <ul class="nav nav-tabs" id="sidebarTabs" role="tablist">
+            <li class="nav-item" role="presentation">
+                <button class="nav-link active" id="users-tab" data-bs-toggle="tab" data-bs-target="#users" type="button" role="tab">
+                    <i class="fas fa-users"></i> All Users
+                </button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="conversations-tab" data-bs-toggle="tab" data-bs-target="#conversations" type="button" role="tab">
+                    <i class="fas fa-comments"></i> Recent
+                </button>
+            </li>
+        </ul>
+        
+        <div class="tab-content" id="sidebarTabContent">
+            <!-- All Users Tab -->
+            <div class="tab-pane fade show active" id="users" role="tabpanel">
+                <div class="user-list">
+                    {% for user in users %}
+                    <div class="user-item" data-user-id="{{ user.id }}" data-username="{{ user.username }}">
+                        <div class="d-flex align-items-center">
+                            <span class="online-indicator offline"></span>
+                            <div>
+                                <div class="fw-bold">{{ user.username }}</div>
+                                <small class="text-muted">
+                                    {% if user.last_seen %}
+                                        Last seen: {{ user.last_seen[:19] }}
+                                    {% else %}
+                                        Never seen
+                                    {% endif %}
+                                </small>
+                            </div>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+            
+            <!-- Recent Conversations Tab -->
+            <div class="tab-pane fade" id="conversations" role="tabpanel">
+                <div class="user-list">
+                    {% for conv in recent_conversations %}
+                    <div class="conversation-item" data-user-id="{{ conv.other_user_id }}" data-username="{{ conv.other_username }}">
+                        <div class="fw-bold">{{ conv.other_username }}</div>
+                        <div class="conversation-preview">{{ conv.last_message[:50] }}{% if conv.last_message|length > 50 %}...{% endif %}</div>
+                        <small class="text-muted">{{ conv.last_message_time[:19] }}</small>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Main Chat Area -->
+    <div class="chat-area">
+        <div class="chat-header">
+            <h5 class="mb-0" id="chat-title">
+                <i class="fas fa-comment"></i> Select a user to start chatting
+            </h5>
+        </div>
+        
+        <div class="message-list" id="message-list">
+            <div class="no-chat-selected">
+                <div class="text-center">
+                    <i class="fas fa-comments fa-3x mb-3"></i>
+                    <p>Select a user from the sidebar to start a conversation</p>
+                </div>
+            </div>
+        </div>
+        
+        <div class="message-input-area" id="message-input-area" style="display: none;">
+            <div class="typing-indicator" id="typing-indicator" style="display: none;"></div>
+            <form id="message-form">
+                <div class="input-group">
+                    <input type="text" class="form-control" id="message-input" placeholder="Type your message..." autocomplete="off">
+                    <button class="btn btn-primary" type="submit">
+                        <i class="fas fa-paper-plane"></i>
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    // Global variables
+    let currentChatUser = null;
+    let socket = null;
+    let typingTimer = null;
+    
+    // Initialize Socket.IO
+    document.addEventListener('DOMContentLoaded', function() {
+        socket = io();
+        
+        // Socket event handlers
+        socket.on('connect', function() {
+            console.log('Connected to server');
+        });
+        
+        socket.on('new_message', function(data) {
+            if (currentChatUser && (data.sender_id == currentChatUser || data.receiver_id == currentChatUser)) {
+                addMessage(data);
+            }
+            // Update conversation list
+            updateConversationList();
+        });
+        
+        socket.on('user_typing', function(data) {
+            if (currentChatUser == data.user_id) {
+                showTypingIndicator(data.username);
+            }
+        });
+        
+        socket.on('user_stop_typing', function(data) {
+            if (currentChatUser == data.user_id) {
+                hideTypingIndicator();
+            }
+        });
+        
+        // User selection
+        document.querySelectorAll('.user-item, .conversation-item').forEach(item => {
+            item.addEventListener('click', function(event) {
+                const userId = this.dataset.userId;
+                const username = this.dataset.username;
+                selectUser(userId, username);
+            });
+        });
+        
+        // Message form submission
+        document.getElementById('message-form').addEventListener('submit', function(e) {
+            e.preventDefault();
+            sendMessage();
+        });
+        
+        // Typing indicator
+        document.getElementById('message-input').addEventListener('input', function() {
+            if (currentChatUser) {
+                clearTimeout(typingTimer);
+                socket.emit('typing', {receiver_id: currentChatUser});
+                
+                typingTimer = setTimeout(function() {
+                    socket.emit('stop_typing', {receiver_id: currentChatUser});
+                }, 1000);
+            }
+        });
+    });
+    
+    function selectUser(userId, username) {
+        currentChatUser = userId;
+        
+        // Update UI
+        document.querySelectorAll('.user-item, .conversation-item').forEach(item => {
+            item.classList.remove('active');
+        });
+        
+        event.target.closest('.user-item, .conversation-item').classList.add('active');
+        
+        document.getElementById('chat-title').innerHTML = `<i class="fas fa-comment"></i> Chat with ${username}`;
+        document.getElementById('message-input-area').style.display = 'block';
+        document.getElementById('message-input').focus();
+        
+        // Load messages
+        loadMessages(userId);
+    }
+    
+    function loadMessages(userId) {
+        fetch(`/messages/${userId}`)
+            .then(response => response.json())
+            .then(messages => {
+                displayMessages(messages);
+            })
+            .catch(error => {
+                console.error('Error loading messages:', error);
+            });
+    }
+    
+    function displayMessages(messages) {
+        const messageList = document.getElementById('message-list');
+        messageList.innerHTML = '';
+        
+        messages.forEach(message => {
+            addMessage(message);
+        });
+        
+        scrollToBottom();
+    }
+    
+    function addMessage(message) {
+        const messageList = document.getElementById('message-list');
+        const messageDiv = document.createElement('div');
+        
+        const isSent = message.sender_id == {{ session.user_id|int }};
+        const messageClass = isSent ? 'message sent' : 'message received';
+        const senderName = isSent ? 'You' : message.sender_username;
+        
+        messageDiv.className = messageClass;
+        messageDiv.innerHTML = `
+            <div class="message-content">${escapeHtml(message.message_content)}</div>
+            <div class="message-time">
+                ${senderName} • ${formatTime(message.timestamp)}
+            </div>
+        `;
+        
+        messageList.appendChild(messageDiv);
+        scrollToBottom();
+    }
+    
+    function sendMessage() {
+        const input = document.getElementById('message-input');
+        const message = input.value.trim();
+        
+        if (!message || !currentChatUser) return;
+        
+        fetch('/send_message', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                receiver_id: currentChatUser,
+                message_content: message
+            })
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.error) {
+                console.error('Error sending message:', data.error);
+            } else {
+                addMessage(data);
+                input.value = '';
+                updateConversationList();
+            }
+        })
+        .catch(error => {
+            console.error('Error sending message:', error);
+        });
+    }
+    
+    function showTypingIndicator(username) {
+        const indicator = document.getElementById('typing-indicator');
+        indicator.textContent = `${username} is typing...`;
+        indicator.style.display = 'block';
+    }
+    
+    function hideTypingIndicator() {
+        document.getElementById('typing-indicator').style.display = 'none';
+    }
+    
+    function scrollToBottom() {
+        const messageList = document.getElementById('message-list');
+        messageList.scrollTop = messageList.scrollHeight;
+    }
+    
+    function updateConversationList() {
+        // This would typically reload the conversation list
+        // For now, we'll just log it
+        console.log('Conversation list updated');
+    }
+    
+    function formatTime(timestamp) {
+        const date = new Date(timestamp);
+        return date.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+    }
+    
+    function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+    
+    // Update online status periodically
+    setInterval(function() {
+        fetch('/online_users')
+            .then(response => response.json())
+            .then(onlineUsers => {
+                // Update online indicators
+                document.querySelectorAll('.user-item').forEach(item => {
+                    const userId = item.dataset.userId;
+                    const indicator = item.querySelector('.online-indicator');
+                    const isOnline = onlineUsers.some(user => user.id == userId);
+                    
+                    indicator.className = `online-indicator ${isOnline ? 'online' : 'offline'}`;
+                });
+            })
+            .catch(error => {
+                console.error('Error updating online status:', error);
+            });
+    }, 30000); // Update every 30 seconds
+</script>
+{% endblock %} 
